@@ -60,31 +60,73 @@ router.get('/employees/leave-balances', async (req, res) => {
 });
 
 // Get specific employee's leave balance
-router.get('/employees/:userId/leave-balance', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { year } = req.query;
-    
-    const employee = await User.findByPk(userId, {
-      attributes: ['id', 'employeeId', 'firstName', 'lastName', 'email', 'department', 'position']
-    });
-    
-    if (!employee) {
-      return res.status(404).json({ message: 'Employee not found' });
+router.get(
+  '/employees/leave-balances',
+  [
+    query('year').optional().isInt({ min: 2000, max: 3000 }).toInt(),
+    query('q').optional().isString().trim().isLength({ max: 64 }),
+    query('page').optional().isInt({ min: 1 }).toInt(),
+    query('pageSize').optional().isInt({ min: 1, max: 200 }).toInt(),
+    query('sort').optional().isIn(['lastName','firstName','employeeId','department']),
+    query('dir').optional().isIn(['asc','desc'])
+  ],
+  validate,
+  async (req, res) => {
+    try {
+      const year = req.query.year || getCurrentFinancialYear();
+      const q = req.query.q || '';
+      const page = req.query.page || 1;
+      const pageSize = req.query.pageSize || 25;
+      const sort = req.query.sort || 'lastName';
+      const dir = (req.query.dir || 'asc').toUpperCase();
+
+      const whereUser = { isActive: true };
+      if (q) {
+        whereUser[Op.or] = [
+          { firstName: { [Op.iLike]: `%${q}%` } },
+          { lastName:  { [Op.iLike]: `%${q}%` } },
+          { email:     { [Op.iLike]: `%${q}%` } },
+          { department:{ [Op.iLike]: `%${q}%` } },
+          { employeeId:{ [Op.iLike]: `%${q}%` } }
+        ];
+      }
+
+      const { count, rows } = await User.findAndCountAll({
+        where: whereUser,
+        attributes: ['id','employeeId','firstName','lastName','email','department','position'],
+        include: [{
+          model: LeaveBalance,
+          as: 'leaveBalances',
+          where: { year },
+          required: false,
+          include: [{ model: LeaveType, as: 'leaveType', attributes: ['code','name'] }]
+        }],
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+        order: [[sort, dir], ['firstName', 'ASC']]
+      });
+
+      // lazily initialize missing balances for just this page
+      for (const e of rows) {
+        if (!e.leaveBalances || e.leaveBalances.length === 0) {
+          e.leaveBalances = await initializeEmployeeLeaveBalances(e.id, year);
+        }
+      }
+
+      res.json({
+        year,
+        page,
+        pageSize,
+        total: count,
+        results: rows
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to fetch leave balances' });
     }
-    
-    const balances = await getEmployeeLeaveBalance(userId, year);
-    
-    res.json({
-      employee,
-      balances,
-      currentYear: getCurrentFinancialYear()
-    });
-  } catch (error) {
-    console.error('Error fetching employee leave balance:', error);
-    res.status(500).json({ message: 'Error fetching employee leave balance' });
   }
-});
+);
+
 
 // Update employee leave balance
 router.put('/employees/:userId/leave-balance', [
